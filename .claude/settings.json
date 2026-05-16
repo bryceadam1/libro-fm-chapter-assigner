@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/opt/homebrew/bin/uv sync:*)",
+      "Bash(.venv/bin/libro-assign --help)",
+      "Bash(/Users/brycelunceford/Documents/Projects/libro-fm-chapter-assigner/.venv/bin/libro-assign assign:*)",
+      "Bash(.venv/bin/python -c \"from libro_assigner.aligner import detect_chapters_from_transcript; print\\('OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from libro_assigner.llm_aligner import detect_chapters_with_llm; print\\('OK'\\)\")",
+      "Bash(.venv/bin/libro-assign assign:*)",
+      "Read(//Users/brycelunceford/Downloads/**)"
+    ]
+  }
+}
