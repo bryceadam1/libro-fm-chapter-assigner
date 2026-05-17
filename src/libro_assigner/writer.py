@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 
-from .aligner import AlignedChapter
+from .types import AlignedChapter
 
 
 def _escape_ffmeta(value: str) -> str:
     """Escape special characters for the ffmetadata format."""
-    # = ; # \ must be escaped with a backslash
     return re.sub(r"([=;#\\])", r"\\\1", value)
-
-
-import re  # noqa: E402  (placed after function to avoid forward-ref issues)
 
 
 def build_ffmetadata(
@@ -34,11 +31,7 @@ def build_ffmetadata(
 
     for i, ch in enumerate(chapters):
         start_ms = ch.start_ms
-        # Chapter end = next chapter's start, or total duration for the last one
-        if i + 1 < len(chapters):
-            end_ms = chapters[i + 1].start_ms
-        else:
-            end_ms = total_duration_ms
+        end_ms = chapters[i + 1].start_ms if i + 1 < len(chapters) else total_duration_ms
 
         lines += [
             "[CHAPTER]",
@@ -76,13 +69,12 @@ def write_chapters(
     try:
         subprocess.run(
             [
-                "ffmpeg",
-                "-y",                   # overwrite output without asking
+                "ffmpeg", "-y",
                 "-i", str(input_path),
                 "-i", str(tmp_path),
-                "-map_metadata", "1",   # use the metadata file
-                "-map_chapters", "1",   # use chapters from metadata file
-                "-codec", "copy",       # no re-encode
+                "-map_metadata", "1",
+                "-map_chapters", "1",
+                "-codec", "copy",
                 str(output_path),
             ],
             check=True,

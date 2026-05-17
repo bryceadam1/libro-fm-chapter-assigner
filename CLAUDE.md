@@ -19,6 +19,13 @@ uv run libro-assign --help
 
 **Run the tool:**
 ```bash
+# GUI (recommended)
+uv run libro-gui
+
+# CLI: extract headings from an EPUB TOC
+uv run libro-assign extract-toc book.epub
+
+# CLI: assign headings to an M4B
 uv run libro-assign assign book.m4b "Introduction" "Chapter One" "Chapter Two" "Epilogue"
 uv run libro-assign assign book.m4b --model small --dry-run "Prologue" "Part I" "Part II"
 ```
@@ -40,20 +47,27 @@ Rather than transcribing audio and fuzzy-matching against a TOC, the new approac
 
 ### Modules
 
+[toc.py](src/libro_assigner/toc.py): Parses an EPUB file with `ebooklib` and returns a flat, ordered list of section heading strings from its table of contents. Handles both EPUB 2 (NCX) and EPUB 3 (nav document) formats. Nested TOC entries are flattened depth-first, preserving document order.
+
 [extractor.py](src/libro_assigner/extractor.py): Calls `ffprobe` to read existing chapter/track boundaries and total duration from the input M4B. Returns a `Chapter` list with `start_ms`/`end_ms`.
+
+[scorer.py](src/libro_assigner/scorer.py): Core scoring engine. Loads a Whisper model and tokenizer (`load_model`), then for each track extracts a temporary audio segment and calls `score_headings`, which encodes the audio once and runs one decoder forward pass per candidate heading. The public entry point is `assign_chapters`, which drives the full loop and returns `AlignedChapter` results.
 
 [writer.py](src/libro_assigner/writer.py): Builds an ffmetadata file from the final `AlignedChapter` list and calls `ffmpeg -codec copy` to embed chapters without re-encoding.
 
-[cli.py](src/libro_assigner/cli.py): Click entry point. `assign` command accepts the M4B path and a variadic `HEADINGS` argument. Not yet implemented beyond the stub.
+[cli.py](src/libro_assigner/cli.py): Click entry point. `assign` reads existing track boundaries, calls `scorer.assign_chapters`, prints results, and optionally writes the output M4B.
+
+[gui.py](src/libro_assigner/gui.py): PySide6 GUI (`libro-gui` entry point). `MainWindow` has three states: pre-import (empty tree), post-import (tracks in left column, headings in right column, both listed independently), and post-alignment (heading-indexed rows where each EPUB heading occupies one row and its assigned track fills the left cell, or is blank if no track was assigned; duplicate-assigned tracks overflow to the bottom with a blank heading cell). Assignment runs in a `_Worker` `QObject` moved to a `QThread`; progress is reported back to the main thread via Qt signals.
 
 ### Key data types
 
 - `Chapter` ([extractor.py](src/libro_assigner/extractor.py)): Existing track from the source file (`index`, `title`, `start_ms`, `end_ms`)
-- `AlignedChapter` — to be defined in a scorer/aligner module: final result (`title`, `start_ms`)
+- `AlignedChapter` ([types.py](src/libro_assigner/types.py)): Final result passed to the writer (`title`, `start_ms`)
 
-### Whisper forced-decoding notes
+### Whisper forced-decoding details
 
-- Default model: `tiny`. Any Whisper size (tiny, base, small, medium, large) can be selected with `--model`.
-- Whisper models are downloaded automatically by `openai-whisper` on first use and cached in `~/.cache/whisper/`.
-- Audio is extracted per-track from the M4B using ffmpeg before being passed to Whisper's encoder.
-- The Whisper tokenizer prepends the standard prompt tokens (language, task) before the heading tokens; these should be excluded when computing the mean log probability.
+- Default model: `tiny`. Any Whisper size (tiny, base, small, medium, large) selectable with `--model`. Models download automatically to `~/.cache/whisper/` on first use.
+- Each track's audio is extracted to a temp file with `ffmpeg -codec copy` (no re-encode), trimmed/padded to 30 s by `whisper.pad_or_trim`, then passed through `model.encoder` once per track.
+- The decoder prefix is `tokenizer.sot_sequence_including_notimestamps` — `[<|startoftranscript|>, <|en|>, <|transcribe|>, <|notimestamps|>]`. Heading tokens follow immediately.
+- Decoder output at position `j` gives `P(token_{j+1} | preceding tokens, audio)`, so heading token `i` is read from logit position `prefix_len - 1 + i`.
+- Each track picks its best heading independently; the same heading can be assigned to multiple tracks.
