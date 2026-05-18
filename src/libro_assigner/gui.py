@@ -76,32 +76,22 @@ def _separator(parent: QWidget) -> QFrame:
 # ---------------------------------------------------------------------------
 
 def _out_of_order_tracks(
-    track_assignments: dict[int, str],
-    headings: list[str],
+    track_assignments: dict[int, int],  # track_idx → h_pos
 ) -> set[int]:
-    """Return track indices whose heading assignment breaks the expected order.
+    """Return track indices whose heading position breaks the expected order.
 
-    Sorts assigned tracks by track index, maps each to its heading's first
-    position in the headings list, then finds the Longest Increasing
-    Subsequence of those positions.  Any track NOT in the LIS is out of order.
+    Sorts assigned tracks by track index and runs patience sort (LIS) on their
+    heading positions.  Positions are unique per assignment, so duplicates
+    in the heading string list never cause false positives.
     """
-    heading_first_pos: dict[str, int] = {}
-    for i, h in enumerate(headings):
-        if h not in heading_first_pos:
-            heading_first_pos[h] = i
-
-    pairs = sorted(
-        (ti, heading_first_pos[h])
-        for ti, h in track_assignments.items()
-        if h and h in heading_first_pos
-    )
+    pairs = sorted(track_assignments.items())  # (track_idx, h_pos) by track_idx
     if not pairs:
         return set()
 
-    h_values = [p for _, p in pairs]
+    h_values = [hp for _, hp in pairs]
 
     tail_vals: list[int] = []
-    tail_src:  list[int] = []   # index into pairs for each pile's current tail
+    tail_src:  list[int] = []
     predecessor = [-1] * len(pairs)
 
     for i, v in enumerate(h_values):
@@ -568,34 +558,24 @@ class MainWindow(QMainWindow):
         self._play_buttons = {}
         self._active_play_btn = None
 
-        # Map heading string → ordered list of positions in self._headings.
-        # Duplicate heading strings (e.g. "Chapter 48" in Deleted Scenes) get
-        # separate entries so each occurrence can be tracked independently.
-        heading_positions: dict[str, list[int]] = defaultdict(list)
-        for i, h in enumerate(self._headings):
-            heading_positions[h].append(i)
-
+        # _track_assignments maps track_idx → h_pos (index into self._headings).
+        # Using positions rather than strings means duplicate heading names are
+        # independently assignable and independently displayed.
         assigned_tracks = set(self._track_assignments)
-        claimed_strings = set(self._track_assignments.values())
+        claimed_positions = set(self._track_assignments.values())
 
-        # Rows are (track_idx | None, heading_pos | None) where heading_pos is
-        # the index into self._headings (not the string itself), so duplicate
-        # headings sort by their respective positions independently.
         rows: list[tuple[int | None, int | None]] = []
 
-        for track_idx, heading in self._track_assignments.items():
-            rows.append((track_idx, heading_positions[heading][0]))
+        for track_idx, h_pos in self._track_assignments.items():
+            rows.append((track_idx, h_pos))
 
         for i in range(len(self._chapters)):
             if i not in assigned_tracks:
                 rows.append((i, None))
 
-        for h, positions in heading_positions.items():
-            # Skip the first occurrence if this heading string is claimed;
-            # any additional occurrences (duplicates) remain as unassigned rows.
-            start = 1 if h in claimed_strings else 0
-            for pos in positions[start:]:
-                rows.append((None, pos))
+        for i in range(len(self._headings)):
+            if i not in claimed_positions:
+                rows.append((None, i))
 
         # Iteratively stabilize: sort by heading pos (nulls inherit preceding),
         # then by track (nulls inherit preceding), until stable or 10 passes.
@@ -623,46 +603,52 @@ class MainWindow(QMainWindow):
 
         rows = _zip_unassigned_blocks(rows)
 
-        out_of_order = _out_of_order_tracks(self._track_assignments, self._headings)
+        out_of_order = _out_of_order_tracks(self._track_assignments)
         yellow = QColor(255, 255, 160)
         black  = QColor(0, 0, 0)
 
         # Build per-track out-of-order tooltips.
+        # Sort in-order assignments by their heading position so we can find
+        # which TOC-order neighbours the out-of-order heading should sit between.
         oo_tooltips: dict[int, str] = {}
         if out_of_order:
-            pairs = sorted(
-                (ti, h) for ti, h in self._track_assignments.items() if h
+            in_order_by_hpos = sorted(
+                (hp, self._headings[hp])
+                for ti, hp in self._track_assignments.items()
+                if ti not in out_of_order
             )
-            for i, (ti, h) in enumerate(pairs):
-                if ti not in out_of_order:
+            for ti in out_of_order:
+                if ti not in self._track_assignments:
                     continue
-                prev_ok = next(
-                    ((tj, hj) for tj, hj in reversed(pairs[:i]) if tj not in out_of_order),
+                hp_oo = self._track_assignments[ti]
+                h_name = self._headings[hp_oo]
+                prev_name = next(
+                    (name for hp, name in reversed(in_order_by_hpos) if hp < hp_oo),
                     None,
                 )
-                next_ok = next(
-                    ((tj, hj) for tj, hj in pairs[i + 1:] if tj not in out_of_order),
+                next_name = next(
+                    (name for hp, name in in_order_by_hpos if hp > hp_oo),
                     None,
                 )
-                msg = f'"{h}" is out of order'
-                if prev_ok and next_ok:
-                    msg += f' — expected between "{prev_ok[1]}" and "{next_ok[1]}"'
-                elif prev_ok:
-                    msg += f' — expected after "{prev_ok[1]}"'
-                elif next_ok:
-                    msg += f' — expected before "{next_ok[1]}"'
+                msg = f'"{h_name}" is out of order'
+                if prev_name and next_name:
+                    msg += f' — expected between "{prev_name}" and "{next_name}"'
+                elif prev_name:
+                    msg += f' — expected after "{prev_name}"'
+                elif next_name:
+                    msg += f' — expected before "{next_name}"'
                 oo_tooltips[ti] = msg
 
         # Render rows into the tree.
         for t_idx, h_pos in rows:
             chapter = self._chapters[t_idx] if t_idx is not None else None
             heading = self._headings[h_pos] if h_pos is not None else None
-            # A row with both t_idx and h_pos is only "assigned" if the scorer
-            # actually paired them; otherwise it is purely a display co-location.
+            # A row with both t_idx and h_pos is only "assigned" if the track
+            # actually maps to that heading position; otherwise it is display co-location.
             is_assigned = (
                 t_idx is not None
-                and heading is not None
-                and self._track_assignments.get(t_idx) == heading
+                and h_pos is not None
+                and self._track_assignments.get(t_idx) == h_pos
             )
             item = QTreeWidgetItem()
 
@@ -812,7 +798,23 @@ class MainWindow(QMainWindow):
         self._thread.start()
 
     def _on_assignments_updated(self, assignments: dict) -> None:
-        self._track_assignments = {k: v for k, v in assignments.items() if v}
+        # assignments is dict[int, str] from the scorer; convert to dict[int, int]
+        # (track_idx → h_pos).  For duplicate heading strings, each track gets
+        # the first unclaimed position.
+        new_assignments: dict[int, int] = {}
+        claimed: set[int] = set()
+        for track_idx, heading_str in sorted(assignments.items()):
+            if not heading_str:
+                continue
+            pos = next(
+                (i for i, h in enumerate(self._headings)
+                 if h == heading_str and i not in claimed),
+                None,
+            )
+            if pos is not None:
+                new_assignments[track_idx] = pos
+                claimed.add(pos)
+        self._track_assignments = new_assignments
         self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
@@ -822,7 +824,7 @@ class MainWindow(QMainWindow):
 
     def _on_assign_done(self) -> None:
         self._progress.setValue(100)
-        n = sum(1 for v in self._track_assignments.values() if v)
+        n = len(self._track_assignments)
         self._status_label.setText(f"Done — {n} track(s) assigned.")
         self._assign_btn.setEnabled(True)
         self._export_btn.setEnabled(bool(self._m4b_path and self._chapters))
@@ -837,6 +839,40 @@ class MainWindow(QMainWindow):
         self._model_combo.setEnabled(True)
         self._seconds_spin.setEnabled(True)
 
+    # ── Heading position management ─────────────────────────────────────────
+
+    def _remap_heading_positions(self, src_pos: int, final_pos: int) -> None:
+        """Update _track_assignments after a heading is moved from src_pos to final_pos.
+
+        final_pos is the insert index *after* the pop at src_pos has already
+        been applied (i.e. it is the value passed to list.insert).
+        """
+        new_assignments: dict[int, int] = {}
+        for ti, hp in self._track_assignments.items():
+            if hp == src_pos:
+                new_assignments[ti] = final_pos
+            else:
+                q = hp if hp < src_pos else hp - 1   # effect of pop(src_pos)
+                r = q if q < final_pos else q + 1    # effect of insert(final_pos)
+                new_assignments[ti] = r
+        self._track_assignments = new_assignments
+
+    def _shift_positions_after_insert(self, insert_pos: int) -> None:
+        """Shift all stored h_pos >= insert_pos up by 1."""
+        self._track_assignments = {
+            ti: (hp + 1 if hp >= insert_pos else hp)
+            for ti, hp in self._track_assignments.items()
+        }
+
+    def _shift_positions_after_delete(self, deleted_pos: int) -> None:
+        """Remove assignments for deleted_pos and shift all larger positions down."""
+        new_assignments: dict[int, int] = {}
+        for ti, hp in self._track_assignments.items():
+            if hp == deleted_pos:
+                continue
+            new_assignments[ti] = hp if hp < deleted_pos else hp - 1
+        self._track_assignments = new_assignments
+
     # ── Heading editing ──────────────────────────────────────────────────────
 
     def _on_drop(
@@ -848,18 +884,22 @@ class MainWindow(QMainWindow):
         col: int,
         drop_above: bool,
     ) -> None:
-        heading_str = self._headings[src_h_pos]
+        current_h_pos = src_h_pos
 
         # 1. Reorder — move the heading in self._headings.
         if dst_h_pos is not None:
+            heading_str = self._headings[src_h_pos]
             self._headings.pop(src_h_pos)
             adj = dst_h_pos - (1 if dst_h_pos > src_h_pos else 0)
-            self._headings.insert(adj if drop_above else adj + 1, heading_str)
+            final_pos = adj if drop_above else adj + 1
+            self._headings.insert(final_pos, heading_str)
+            self._remap_heading_positions(src_h_pos, final_pos)
+            current_h_pos = final_pos
 
         # 2. Assign — only if not already claimed by another track.
         if col == _COL_ASSIGNED and dst_t_idx is not None:
-            if heading_str not in self._claimed_headings:
-                self._track_assignments[dst_t_idx] = heading_str
+            if current_h_pos not in self._claimed_headings:
+                self._track_assignments[dst_t_idx] = current_h_pos
 
         # 3. Unassign.
         if col == _COL_PENDING and src_t_idx is not None:
@@ -881,16 +921,9 @@ class MainWindow(QMainWindow):
             return
         if new_name == old_name:
             return
-        was_representative = (
-            next((i for i, h in enumerate(self._headings) if h == old_name), None)
-            == h_pos
-        )
+        # Assignments store positions, so renaming the heading string requires
+        # no update to _track_assignments.
         self._headings[h_pos] = new_name
-        if was_representative:
-            for ti in list(self._track_assignments):
-                if self._track_assignments[ti] == old_name:
-                    self._track_assignments[ti] = new_name
-        self._claimed_headings = set(self._track_assignments.values())
         QTimer.singleShot(0, self._rebuild_view)
 
     def _on_context_menu(self, pos) -> None:
@@ -903,7 +936,7 @@ class MainWindow(QMainWindow):
         is_assigned = (
             t_idx is not None
             and h_pos is not None
-            and self._track_assignments.get(t_idx) == self._headings[h_pos]
+            and self._track_assignments.get(t_idx) == h_pos
         )
 
         menu = QMenu(self)
@@ -934,17 +967,7 @@ class MainWindow(QMainWindow):
         )
         if not ok or not new_name.strip() or new_name.strip() == old_name:
             return
-        new_name = new_name.strip()
-        was_representative = (
-            next((i for i, h in enumerate(self._headings) if h == old_name), None)
-            == h_pos
-        )
-        self._headings[h_pos] = new_name
-        if was_representative:
-            for ti in list(self._track_assignments):
-                if self._track_assignments[ti] == old_name:
-                    self._track_assignments[ti] = new_name
-        self._claimed_headings = set(self._track_assignments.values())
+        self._headings[h_pos] = new_name.strip()
         self._rebuild_view()
 
     def _add_heading(self, h_pos: int) -> None:
@@ -952,26 +975,30 @@ class MainWindow(QMainWindow):
         if not ok or not name.strip():
             return
         self._headings.insert(h_pos, name.strip())
+        self._shift_positions_after_insert(h_pos)
+        self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
     def _delete_heading(self, h_pos: int) -> None:
-        old_name = self._headings.pop(h_pos)
-        if old_name not in self._headings:
-            self._track_assignments = {
-                k: v for k, v in self._track_assignments.items() if v != old_name
-            }
+        self._headings.pop(h_pos)
+        self._shift_positions_after_delete(h_pos)
         self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
     def _combine_with_above(self, h_pos: int) -> None:
-        above_name = self._headings[h_pos - 1]
-        current_name = self._headings[h_pos]
-        combined = f"{above_name} / {current_name}"
+        combined = f"{self._headings[h_pos - 1]} / {self._headings[h_pos]}"
         self._headings[h_pos - 1] = combined
         self._headings.pop(h_pos)
-        for ti in list(self._track_assignments):
-            if self._track_assignments[ti] in (above_name, current_name):
-                self._track_assignments[ti] = combined
+        # h_pos is deleted: redirect its assignments to h_pos-1, shift the rest.
+        new_assignments: dict[int, int] = {}
+        for ti, hp in self._track_assignments.items():
+            if hp == h_pos:
+                new_assignments[ti] = h_pos - 1
+            elif hp > h_pos:
+                new_assignments[ti] = hp - 1
+            else:
+                new_assignments[ti] = hp
+        self._track_assignments = new_assignments
         self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
@@ -986,7 +1013,7 @@ class MainWindow(QMainWindow):
 
         unassigned_count = sum(
             1 for i in range(len(self._chapters))
-            if not self._track_assignments.get(i)
+            if i not in self._track_assignments
         )
         if unassigned_count:
             reply = QMessageBox.question(
@@ -1011,7 +1038,11 @@ class MainWindow(QMainWindow):
 
         aligned = [
             AlignedChapter(
-                title=self._track_assignments.get(i) or self._chapters[i].title,
+                title=(
+                    self._headings[self._track_assignments[i]]
+                    if i in self._track_assignments
+                    else self._chapters[i].title
+                ),
                 start_ms=self._chapters[i].start_ms,
             )
             for i in range(len(self._chapters))
@@ -1025,14 +1056,13 @@ class MainWindow(QMainWindow):
 
     def _assign_collocated(self, track_idx: int, h_pos: int) -> None:
         """Assign the co-located (display-only) heading to its adjacent track."""
-        heading = self._headings[h_pos]
-        if heading in self._claimed_headings:
+        if h_pos in self._claimed_headings:
             QMessageBox.warning(
                 self, "Already Assigned",
-                f'"{heading}" is already assigned to another track.',
+                f'"{self._headings[h_pos]}" is already assigned to another track.',
             )
             return
-        self._track_assignments[track_idx] = heading
+        self._track_assignments[track_idx] = h_pos
         self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
@@ -1042,23 +1072,28 @@ class MainWindow(QMainWindow):
         self._rebuild_view()
 
     def _show_heading_picker(self, track_idx: int) -> None:
-        unassigned = [h for h in self._headings if h not in self._claimed_headings]
+        unassigned = [
+            (i, h) for i, h in enumerate(self._headings)
+            if i not in self._claimed_headings
+        ]
         if not unassigned:
             QMessageBox.information(
                 self, "No Headings Available", "All headings are already assigned."
             )
             return
-        heading, ok = QInputDialog.getItem(
+        display_names = [h for _, h in unassigned]
+        heading_str, ok = QInputDialog.getItem(
             self,
             "Assign Heading",
             f"Select heading for Track {track_idx + 1}:",
-            unassigned,
+            display_names,
             0,
             False,
         )
-        if not ok or not heading:
+        if not ok or not heading_str:
             return
-        self._track_assignments[track_idx] = heading
+        h_pos = next(i for i, h in unassigned if h == heading_str)
+        self._track_assignments[track_idx] = h_pos
         self._claimed_headings = set(self._track_assignments.values())
         self._rebuild_view()
 
